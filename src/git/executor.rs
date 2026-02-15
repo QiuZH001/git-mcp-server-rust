@@ -30,14 +30,17 @@ impl GitExecutor {
         self.working_dir = None;
     }
 
-    fn build_command(&self, args: &[&str]) -> Command {
+    fn build_command_in_dir(&self, args: &[&str], dir: Option<&PathBuf>) -> Result<Command> {
         let mut cmd = Command::new("git");
 
         for arg in args {
             cmd.arg(arg);
         }
 
-        if let Some(dir) = &self.working_dir {
+        if let Some(dir) = dir {
+            let validated = self.config.validate_path(dir)?;
+            cmd.current_dir(validated);
+        } else if let Some(dir) = &self.working_dir {
             cmd.current_dir(dir);
         } else if let Some(base) = &self.config.git_base_dir {
             cmd.current_dir(base);
@@ -55,11 +58,35 @@ impl GitExecutor {
 
         cmd.env("GIT_TERMINAL_PROMPT", "0");
 
-        cmd
+        Ok(cmd)
     }
 
     pub fn execute(&self, args: &[&str]) -> Result<GitOutput> {
-        let mut cmd = self.build_command(args);
+        let mut cmd = self.build_command_in_dir(args, None)?;
+
+        let output = cmd
+            .output()
+            .map_err(|e| GitMcpError::GitCommandFailed(format!("Failed to execute git: {}", e)))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            return Err(GitMcpError::GitCommandFailed(format!(
+                "Git command failed with status {}: {}",
+                output.status, stderr
+            )));
+        }
+
+        Ok(GitOutput {
+            stdout,
+            stderr,
+            status: output.status.code().unwrap_or(-1),
+        })
+    }
+
+    pub fn execute_in_dir(&self, dir: &PathBuf, args: &[&str]) -> Result<GitOutput> {
+        let mut cmd = self.build_command_in_dir(args, Some(dir))?;
 
         let output = cmd
             .output()
@@ -83,7 +110,50 @@ impl GitExecutor {
     }
 
     pub fn execute_with_stdin(&self, args: &[&str], stdin_data: &str) -> Result<GitOutput> {
-        let mut cmd = self.build_command(args);
+        let mut cmd = self.build_command_in_dir(args, None)?;
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| GitMcpError::GitCommandFailed(format!("Failed to spawn git: {}", e)))?;
+
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(stdin_data.as_bytes()).map_err(|e| {
+                GitMcpError::GitCommandFailed(format!("Failed to write stdin: {}", e))
+            })?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|e| GitMcpError::GitCommandFailed(format!("Failed to wait for git: {}", e)))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            return Err(GitMcpError::GitCommandFailed(format!(
+                "Git command failed with status {}: {}",
+                output.status, stderr
+            )));
+        }
+
+        Ok(GitOutput {
+            stdout,
+            stderr,
+            status: output.status.code().unwrap_or(-1),
+        })
+    }
+
+    pub fn execute_with_stdin_in_dir(
+        &self,
+        dir: &PathBuf,
+        args: &[&str],
+        stdin_data: &str,
+    ) -> Result<GitOutput> {
+        let mut cmd = self.build_command_in_dir(args, Some(dir))?;
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
