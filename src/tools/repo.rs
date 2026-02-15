@@ -306,13 +306,9 @@ pub async fn git_clean(ctx: ToolContext, input: GitCleanInput) -> Result<GitClea
         .stdout
         .lines()
         .filter_map(|l| {
-            if let Some(rest) = l.strip_prefix("Would remove ") {
-                Some(rest.trim().to_string())
-            } else if let Some(rest) = l.strip_prefix("Removing ") {
-                Some(rest.trim().to_string())
-            } else {
-                None
-            }
+            l.strip_prefix("Would remove ")
+                .or_else(|| l.strip_prefix("Removing "))
+                .map(|rest| rest.trim().to_string())
         })
         .collect();
 

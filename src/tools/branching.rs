@@ -134,7 +134,7 @@ pub async fn git_branch(ctx: ToolContext, input: GitBranchInput) -> Result<GitBr
                 message: String::new(),
             })
         }
-        Some("list") | _ => {
+        _ => {
             let mut args = vec![
                 "branch",
                 "-vv",

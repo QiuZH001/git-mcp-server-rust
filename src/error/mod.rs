@@ -14,6 +14,9 @@ pub enum GitMcpError {
     #[error("Invalid repository state: {0}")]
     InvalidState(String),
 
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 

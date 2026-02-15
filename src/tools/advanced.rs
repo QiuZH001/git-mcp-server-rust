@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::tools::repo;
 use crate::tools::ToolContext;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -524,20 +525,20 @@ pub async fn git_worktree(ctx: ToolContext, input: GitWorktreeInput) -> Result<G
             let mut current: Option<GitWorktreeInfo> = None;
 
             for line in output.stdout.lines() {
-                if line.starts_with("worktree ") {
+                if let Some(rest) = line.strip_prefix("worktree ") {
                     if let Some(curr) = current.take() {
                         worktrees.push(curr);
                     }
                     current = Some(GitWorktreeInfo {
-                        worktree_path: line[9..].to_string(),
+                        worktree_path: rest.to_string(),
                         head_hash: String::new(),
                         branch: None,
                     });
                 } else if let Some(ref mut curr) = current {
-                    if line.starts_with("HEAD ") {
-                        curr.head_hash = line[5..].to_string();
-                    } else if line.starts_with("branch ") {
-                        curr.branch = Some(line[7..].to_string());
+                    if let Some(rest) = line.strip_prefix("HEAD ") {
+                        curr.head_hash = rest.to_string();
+                    } else if let Some(rest) = line.strip_prefix("branch ") {
+                        curr.branch = Some(rest.to_string());
                     }
                 }
             }
@@ -635,4 +636,113 @@ pub async fn git_clear_working_dir(
         success: true,
         message: "Working directory cleared".to_string(),
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GitWrapupInstructionsInput {
+    #[schemars(description = "Acknowledgement to initiate wrap-up workflow (Y/Yes)")]
+    pub acknowledgement: String,
+
+    #[schemars(description = "Include instruction to update agent meta files (Y/Yes)")]
+    #[serde(rename = "updateAgentMetaFiles")]
+    pub update_agent_meta_files: Option<String>,
+
+    #[schemars(description = "If true, instruct to create an annotated tag")]
+    #[serde(rename = "createTag")]
+    pub create_tag: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GitWrapupGitStatus {
+    pub branch: String,
+    pub staged: Vec<String>,
+    pub unstaged: Vec<String>,
+    pub untracked: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GitWrapupInstructionsOutput {
+    pub instructions: String,
+    #[serde(rename = "gitStatus")]
+    pub git_status: Option<GitWrapupGitStatus>,
+    #[serde(rename = "gitStatusError")]
+    pub git_status_error: Option<String>,
+}
+
+pub async fn git_wrapup_instructions(
+    ctx: ToolContext,
+    input: GitWrapupInstructionsInput,
+) -> Result<GitWrapupInstructionsOutput> {
+    let ack = input.acknowledgement.to_lowercase();
+    if ack != "y" && ack != "yes" {
+        return Ok(GitWrapupInstructionsOutput {
+            instructions: "Acknowledgement required (acknowledgement='Y' or 'Yes')".to_string(),
+            git_status: None,
+            git_status_error: None,
+        });
+    }
+
+    let mut instructions = default_wrapup_instructions();
+
+    if let Some(path) = &ctx.config.git_wrapup_instructions_path {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            if !contents.trim().is_empty() {
+                instructions = contents;
+            }
+        }
+    }
+
+    if input
+        .update_agent_meta_files
+        .as_deref()
+        .map(|s| {
+            let s = s.to_lowercase();
+            s == "y" || s == "yes"
+        })
+        .unwrap_or(false)
+    {
+        instructions.push_str("\n\nAgent meta files:\n- Update any agent-specific meta files required by your workflow.\n");
+    }
+
+    if input.create_tag.unwrap_or(false) {
+        instructions.push_str("\n\nTagging:\n- After all commits are created, create an annotated tag for the release.\n");
+    }
+
+    let (git_status, git_status_error) = match repo::git_status(
+        ctx.clone(),
+        repo::GitStatusInput {
+            path: None,
+            include_untracked: Some(true),
+        },
+    )
+    .await
+    {
+        Ok(st) => (
+            Some(GitWrapupGitStatus {
+                branch: st.branch.unwrap_or_else(|| "".to_string()),
+                staged: st.staged,
+                unstaged: st.unstaged,
+                untracked: st.untracked,
+            }),
+            None,
+        ),
+        Err(e) => (None, Some(e.to_string())),
+    };
+
+    Ok(GitWrapupInstructionsOutput {
+        instructions,
+        git_status,
+        git_status_error,
+    })
+}
+
+fn default_wrapup_instructions() -> String {
+    let mut s = String::new();
+    s.push_str("Wrap-up workflow:\n");
+    s.push_str("1) Set working directory with git_set_working_dir if needed.\n");
+    s.push_str("2) Review changes using git_diff (include untracked if needed).\n");
+    s.push_str("3) Update CHANGELOG.md for the release notes.\n");
+    s.push_str("4) Review/update README.md and documentation for significant changes.\n");
+    s.push_str("5) Create atomic commits with clear messages.\n");
+    s
 }

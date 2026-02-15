@@ -308,19 +308,19 @@ pub async fn git_blame(ctx: ToolContext, input: GitBlameInput) -> Result<GitBlam
     let mut line_num = 0;
 
     for line in output.stdout.lines() {
-        if line.starts_with("author ") {
+        if let Some(rest) = line.strip_prefix("author ") {
             if let Some(ref mut curr) = current_line {
-                curr.author = line[7..].to_string();
+                curr.author = rest.to_string();
             }
         } else if line.starts_with("author-mail ") {
-        } else if line.starts_with("author-time ") {
+        } else if let Some(rest) = line.strip_prefix("author-time ") {
             if let Some(ref mut curr) = current_line {
-                curr.date = line[12..].to_string();
+                curr.date = rest.to_string();
             }
-        } else if line.starts_with('\t') {
+        } else if let Some(rest) = line.strip_prefix('\t') {
             if let Some(curr) = current_line.take() {
                 lines.push(GitBlameLine {
-                    content: line[1..].to_string(),
+                    content: rest.to_string(),
                     ..curr
                 });
             }

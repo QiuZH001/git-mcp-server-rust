@@ -1,4 +1,5 @@
 pub mod advanced;
+pub mod analysis;
 pub mod branching;
 pub mod history;
 pub mod remote;

@@ -4,9 +4,10 @@
 
 ## 特性
 
-- **26 个 Git 工具** - 覆盖所有常用 Git 操作
-- **STDIO 传输** - 与 MCP 客户端无缝集成
+- **28 个 Git 工具** - 覆盖所有常用 Git 操作 + changelog 分析 + wrap-up 指令
+- **STDIO / HTTP 传输** - 支持 STDIO 与 `streamable-http` 风格单端点
 - **会话工作目录** - 支持动态切换项目目录
+- **MCP Resources / Prompts** - 支持 `resources/list|read` 与 `prompts/list|get`
 - **安全路径验证** - 可配置的基础目录限制
 - **高性能** - Rust 实现，单二进制部署
 
@@ -50,8 +51,21 @@ cp ./target/release/git-mcp-server /usr/local/bin/
 | `GIT_USERNAME` | Git 提交者名称 | 全局 git config | `John Doe` |
 | `GIT_EMAIL` | Git 提交者邮箱 | 全局 git config | `john@example.com` |
 | `GIT_SIGN_COMMITS` | 启用提交签名 | `false` | `true` |
+| `GIT_WRAPUP_INSTRUCTIONS_PATH` | 自定义 wrap-up 指令文件路径 | 无 | `/path/to/wrapup.md` |
 | `MCP_LOG_LEVEL` | 日志级别 | `info` | `debug`, `warn`, `error` |
 | `MCP_TRANSPORT_TYPE` | 传输类型 | `stdio` | `http` |
+| `MCP_HTTP_HOST` | HTTP 监听地址 | `127.0.0.1` | `127.0.0.1` |
+| `MCP_HTTP_PORT` | HTTP 监听端口 | `3015` | `3015` |
+| `MCP_HTTP_ENDPOINT_PATH` | HTTP MCP 端点路径 | `/mcp` | `/mcp` |
+| `MCP_AUTH_MODE` | HTTP 认证模式 | `none` | `none`, `jwt`, `oauth` |
+| `MCP_AUTH_SECRET_KEY` | JWT(HS256) 密钥（jwt 模式） | 无 | `your-secret` |
+| `OAUTH_ISSUER_URL` | OAuth issuer（oauth 模式） | 无 | `https://issuer.example` |
+| `OAUTH_AUDIENCE` | OAuth audience（oauth 模式） | 无 | `git-mcp-server` |
+| `OAUTH_PUBLIC_KEY_PEM` | OAuth RS256 公钥 PEM（oauth 模式） | 无 | `-----BEGIN PUBLIC KEY-----...` |
+| `MCP_ALLOWED_ORIGINS` | 允许的 Origin 白名单（逗号分隔） | 无 | `https://a.com,https://b.com` |
+| `MCP_SESSION_MODE` | HTTP 会话模式 | `auto` | `stateless`, `stateful` |
+| `MCP_RESPONSE_FORMAT` | tools/call 文本输出格式 | `json` | `json`, `markdown`, `auto` |
+| `MCP_RESPONSE_VERBOSITY` | tools/call 输出详略 | `standard` | `minimal`, `standard`, `full` |
 
 ### MCP 客户端配置
 
@@ -184,6 +198,28 @@ cp ./target/release/git-mcp-server /usr/local/bin/
 | `git_worktree` | 工作树管理 | `mode`, `worktree_path`, `branch` |
 | `git_set_working_dir` | 设置会话目录 | `path` |
 | `git_clear_working_dir` | 清除会话目录 | `confirm` |
+| `git_changelog_analyze` | 提供 changelog 分析上下文与指令 | `path`, `reviewTypes`, `maxCommits`, `sinceTag`, `branch` |
+| `git_wrapup_instructions` | 返回收尾流程指令与当前状态 | `acknowledgement`, `updateAgentMetaFiles`, `createTag` |
+
+## MCP 方法
+
+支持以下 MCP / JSON-RPC 方法：
+
+- `initialize`
+- `tools/list`
+- `tools/call`
+- `resources/list`
+- `resources/read`
+- `prompts/list`
+- `prompts/get`
+
+### Resources
+
+- `git://working-directory`：返回当前会话工作目录
+
+### Prompts
+
+- `git_wrapup`：Git 收尾工作流提示词模板（支持参数）
 
 ## 使用示例
 

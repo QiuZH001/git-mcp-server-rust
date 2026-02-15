@@ -255,7 +255,7 @@ pub async fn git_diff(ctx: ToolContext, input: GitDiffInput) -> Result<GitDiffOu
         // Parse "X files changed, Y insertions(+), Z deletions(-)"
         let parts: Vec<&str> = last_line.split(',').collect();
         let fc = parts
-            .get(0)
+            .first()
             .and_then(|s| s.split_whitespace().next())
             .and_then(|s| s.parse().ok());
         let ins = parts
