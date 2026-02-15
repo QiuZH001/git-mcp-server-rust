@@ -1,9 +1,11 @@
 use crate::config::Config;
-use crate::tools::{ToolContext, repo, staging, history, branching, remote, advanced};
 use crate::git::GitExecutor;
+use crate::tools::{advanced, branching, history, remote, repo, staging, ToolContext};
+use schemars::schema_for;
+use schemars::JsonSchema;
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde_json::Value;
 
 pub async fn run_server(config: Config) -> anyhow::Result<()> {
     let executor = GitExecutor::new(config.clone());
@@ -18,14 +20,14 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
 
 async fn run_stdio_server(ctx: ToolContext) -> anyhow::Result<()> {
     use std::io::{self, BufRead, Write};
-    
+
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    
+
     let mut line = String::new();
     let stdin_lock = stdin.lock();
-    
+
     for line_result in stdin_lock.lines() {
         line.clear();
         match line_result {
@@ -41,129 +43,169 @@ async fn run_stdio_server(ctx: ToolContext) -> anyhow::Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }
 
 async fn handle_request(ctx: &ToolContext, input: &str) -> String {
     let request: Result<JsonRpcRequest, _> = serde_json::from_str(input);
-    
+
     match request {
         Ok(req) => {
+            let id = req.id.clone();
             let result = process_request(ctx, req).await;
             match result {
-                Ok(response) => json_rpc_response(response),
-                Err(e) => json_rpc_error(&e.to_string(), -32603),
+                Ok(response) => json_rpc_response(id, response),
+                Err(e) => json_rpc_error(id, &e.to_string(), -32603),
             }
         }
-        Err(e) => {
-            json_rpc_error(&format!("Parse error: {}", e), -32700)
-        }
+        Err(e) => json_rpc_error(None, &format!("Parse error: {}", e), -32700),
     }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct JsonRpcRequest {
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     id: Option<Value>,
     method: String,
     params: Option<Value>,
 }
 
-fn json_rpc_response(result: Value) -> String {
+fn json_rpc_response(id: Option<Value>, result: Value) -> String {
     serde_json::json!({
         "jsonrpc": "2.0",
-        "result": result
-    }).to_string()
+        "result": result,
+        "id": id
+    })
+    .to_string()
 }
 
-fn json_rpc_error(message: &str, code: i32) -> String {
+fn json_rpc_error(id: Option<Value>, message: &str, code: i32) -> String {
     serde_json::json!({
         "jsonrpc": "2.0",
         "error": {
             "code": code,
             "message": message
         },
-        "id": null
-    }).to_string()
+        "id": id
+    })
+    .to_string()
 }
 
 async fn process_request(ctx: &ToolContext, req: JsonRpcRequest) -> anyhow::Result<Value> {
     match req.method.as_str() {
-        "initialize" => {
-            Ok(serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {}
-                },
-                "serverInfo": {
-                    "name": "git-mcp-server",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            }))
-        }
-        
-        "tools/list" => {
-            Ok(serde_json::json!({
-                "tools": get_tool_definitions()
-            }))
-        }
-        
+        "initialize" => Ok(serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {}
+            },
+            "serverInfo": {
+                "name": "git-mcp-server",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        })),
+
+        "tools/list" => Ok(serde_json::json!({
+            "tools": get_tool_definitions()
+        })),
+
         "tools/call" => {
-            let params = req.params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
-            let name = params.get("name")
+            let params = req
+                .params
+                .ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+            let name = params
+                .get("name")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing tool name"))?;
-            let arguments = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-            
-            execute_tool(ctx, name, arguments).await
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+
+            match execute_tool(ctx, name, arguments).await {
+                Ok(value) => Ok(call_tool_ok(value)),
+                Err(e) => Ok(call_tool_error(e.to_string())),
+            }
         }
-        
-        _ => {
-            Err(anyhow::anyhow!("Unknown method: {}", req.method))
-        }
+
+        _ => Err(anyhow::anyhow!("Unknown method: {}", req.method)),
     }
+}
+
+fn call_tool_ok(value: Value) -> Value {
+    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": text
+        }],
+        "isError": false
+    })
+}
+
+fn call_tool_error(message: String) -> Value {
+    serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": message
+        }],
+        "isError": true
+    })
 }
 
 fn get_tool_definitions() -> Vec<Value> {
     vec![
-        tool_def("git_status", "Show the working tree status", "GitStatusInput"),
-        tool_def("git_init", "Initialize a new Git repository", "GitInitInput"),
-        tool_def("git_clone", "Clone a repository from a remote URL", "GitCloneInput"),
-        tool_def("git_clean", "Remove untracked files from the working tree", "GitCleanInput"),
-        tool_def("git_add", "Stage files for commit", "GitAddInput"),
-        tool_def("git_commit", "Create a new commit", "GitCommitInput"),
-        tool_def("git_diff", "View differences", "GitDiffInput"),
-        tool_def("git_log", "View commit history", "GitLogInput"),
-        tool_def("git_show", "Show details of a git object", "GitShowInput"),
-        tool_def("git_blame", "Show line-by-line authorship", "GitBlameInput"),
-        tool_def("git_reflog", "View the reference logs", "GitReflogInput"),
-        tool_def("git_branch", "Manage branches", "GitBranchInput"),
-        tool_def("git_checkout", "Switch branches or restore working tree files", "GitCheckoutInput"),
-        tool_def("git_merge", "Merge branches together", "GitMergeInput"),
-        tool_def("git_rebase", "Rebase commits onto another branch", "GitRebaseInput"),
-        tool_def("git_cherry_pick", "Cherry-pick commits", "GitCherryPickInput"),
-        tool_def("git_remote", "Manage remote repositories", "GitRemoteInput"),
-        tool_def("git_fetch", "Fetch updates from a remote repository", "GitFetchInput"),
-        tool_def("git_pull", "Pull changes from a remote repository", "GitPullInput"),
-        tool_def("git_push", "Push changes to a remote repository", "GitPushInput"),
-        tool_def("git_tag", "Manage tags", "GitTagInput"),
-        tool_def("git_stash", "Manage stashes", "GitStashInput"),
-        tool_def("git_reset", "Reset current HEAD to specified state", "GitResetInput"),
-        tool_def("git_worktree", "Manage multiple working trees", "GitWorktreeInput"),
-        tool_def("git_set_working_dir", "Set the session working directory", "GitSetWorkingDirInput"),
-        tool_def("git_clear_working_dir", "Clear the session working directory", "GitClearWorkingDirInput"),
+        tool_def::<repo::GitStatusInput>("git_status", "Show the working tree status"),
+        tool_def::<repo::GitInitInput>("git_init", "Initialize a new Git repository"),
+        tool_def::<repo::GitCloneInput>("git_clone", "Clone a repository from a remote URL"),
+        tool_def::<repo::GitCleanInput>(
+            "git_clean",
+            "Remove untracked files from the working tree",
+        ),
+        tool_def::<staging::GitAddInput>("git_add", "Stage files for commit"),
+        tool_def::<staging::GitCommitInput>("git_commit", "Create a new commit"),
+        tool_def::<staging::GitDiffInput>("git_diff", "View differences"),
+        tool_def::<history::GitLogInput>("git_log", "View commit history"),
+        tool_def::<history::GitShowInput>("git_show", "Show details of a git object"),
+        tool_def::<history::GitBlameInput>("git_blame", "Show line-by-line authorship"),
+        tool_def::<history::GitReflogInput>("git_reflog", "View the reference logs"),
+        tool_def::<branching::GitBranchInput>("git_branch", "Manage branches"),
+        tool_def::<branching::GitCheckoutInput>(
+            "git_checkout",
+            "Switch branches or restore working tree files",
+        ),
+        tool_def::<branching::GitMergeInput>("git_merge", "Merge branches together"),
+        tool_def::<branching::GitRebaseInput>("git_rebase", "Rebase commits onto another branch"),
+        tool_def::<branching::GitCherryPickInput>("git_cherry_pick", "Cherry-pick commits"),
+        tool_def::<remote::GitRemoteInput>("git_remote", "Manage remote repositories"),
+        tool_def::<remote::GitFetchInput>("git_fetch", "Fetch updates from a remote repository"),
+        tool_def::<remote::GitPullInput>("git_pull", "Pull changes from a remote repository"),
+        tool_def::<remote::GitPushInput>("git_push", "Push changes to a remote repository"),
+        tool_def::<advanced::GitTagInput>("git_tag", "Manage tags"),
+        tool_def::<advanced::GitStashInput>("git_stash", "Manage stashes"),
+        tool_def::<advanced::GitResetInput>("git_reset", "Reset current HEAD to specified state"),
+        tool_def::<advanced::GitWorktreeInput>("git_worktree", "Manage multiple working trees"),
+        tool_def::<advanced::GitSetWorkingDirInput>(
+            "git_set_working_dir",
+            "Set the session working directory",
+        ),
+        tool_def::<advanced::GitClearWorkingDirInput>(
+            "git_clear_working_dir",
+            "Clear the session working directory",
+        ),
     ]
 }
 
-fn tool_def(name: &str, description: &str, input_schema: &str) -> Value {
+fn tool_def<T: JsonSchema>(name: &str, description: &str) -> Value {
+    let schema = schema_for!(T);
+    let input_schema = serde_json::to_value(&schema.schema)
+        .unwrap_or_else(|_| serde_json::json!({"type": "object"}));
+
     serde_json::json!({
         "name": name,
         "description": description,
-        "inputSchema": {
-            "type": "object",
-            "$ref": format!("#/definitions/{}", input_schema)
-        }
+        "inputSchema": input_schema
     })
 }
 
@@ -299,8 +341,6 @@ async fn execute_tool(ctx: &ToolContext, name: &str, arguments: Value) -> anyhow
             let result = advanced::git_clear_working_dir(ctx.clone(), input).await?;
             Ok(serde_json::to_value(result)?)
         }
-        _ => {
-            Err(anyhow::anyhow!("Unknown tool: {}", name))
-        }
+        _ => Err(anyhow::anyhow!("Unknown tool: {}", name)),
     }
 }
