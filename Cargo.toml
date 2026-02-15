@@ -1,0 +1,45 @@
+[package]
+name = "git-mcp-server"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust implementation of Git MCP Server for AI agents"
+license = "Apache-2.0"
+authors = ["Rust MCP Developer"]
+
+[dependencies]
+# MCP SDK
+rmcp = { version = "0.1", features = ["server"] }
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# JSON Schema
+schemars = "0.8"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Path handling
+path-clean = "1.0"
+
+[dev-dependencies]
+tempfile = "3.8"
+assert_cmd = "2.0"
+predicates = "3.0"
+serde_json = "1.0"
+
+[[bin]]
+name = "git-mcp-server"
+path = "src/main.rs"

@@ -1,0 +1,27 @@
+pub mod repo;
+pub mod staging;
+pub mod history;
+pub mod branching;
+pub mod remote;
+pub mod advanced;
+
+use crate::config::Config;
+use crate::git::GitExecutor;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+#[derive(Clone)]
+pub struct ToolContext {
+    pub config: Config,
+    pub executor: Arc<RwLock<GitExecutor>>,
+}
+
+impl ToolContext {
+    pub fn new(config: Config) -> Self {
+        let executor = GitExecutor::new(config.clone());
+        Self {
+            config,
+            executor: Arc::new(RwLock::new(executor)),
+        }
+    }
+}
