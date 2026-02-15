@@ -1,9 +1,9 @@
+pub mod advanced;
+pub mod branching;
+pub mod history;
+pub mod remote;
 pub mod repo;
 pub mod staging;
-pub mod history;
-pub mod branching;
-pub mod remote;
-pub mod advanced;
 
 use crate::config::Config;
 use crate::git::GitExecutor;
