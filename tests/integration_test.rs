@@ -69,6 +69,44 @@ fn get_binary_path() -> PathBuf {
         .join("git-mcp-server")
 }
 
+fn init_repo(path: &std::path::Path) {
+    Command::new("git")
+        .args(["init", "--initial-branch=main"])
+        .current_dir(path)
+        .output()
+        .expect("Failed to init repo");
+}
+
+fn config_user(path: &std::path::Path) {
+    Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(path)
+        .output()
+        .expect("Failed to config email");
+
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(path)
+        .output()
+        .expect("Failed to config name");
+}
+
+fn commit_file(path: &std::path::Path, file: &str, content: &str, message: &str) {
+    std::fs::write(path.join(file), content).expect("Failed to write file");
+
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(path)
+        .output()
+        .expect("Failed to add files");
+
+    Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(path)
+        .output()
+        .expect("Failed to commit");
+}
+
 #[test]
 fn test_initialize() {
     let mut server = TestServer::new();
@@ -961,6 +999,416 @@ fn test_git_reset() {
                 "mode": "soft",
                 "target": "HEAD~1",
                 "confirmed": false
+            }
+        }
+    })
+    .to_string();
+
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+}
+
+#[test]
+fn test_tools_list_schema_no_definitions_ref() {
+    let mut server = TestServer::new();
+    let request = r#"{"jsonrpc":"2.0","id":20,"method":"tools/list","params":{}}"#;
+    let response = server.send(request);
+    assert!(
+        !response.contains("#/definitions/"),
+        "tools/list inputSchema should not contain unresolved $ref: {}",
+        response
+    );
+}
+
+#[test]
+fn test_git_status_with_path_argument() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo_path = temp_dir.path().to_string_lossy().to_string();
+    init_repo(temp_dir.path());
+
+    let mut server = TestServer::new();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 21,
+        "method": "tools/call",
+        "params": {
+            "name": "git_status",
+            "arguments": {
+                "path": repo_path
+            }
+        }
+    })
+    .to_string();
+
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+}
+
+#[test]
+fn test_git_clone() {
+    let src_dir = TempDir::new().unwrap();
+    init_repo(src_dir.path());
+    config_user(src_dir.path());
+    commit_file(src_dir.path(), "test.txt", "hello", "Initial commit");
+
+    let dst_parent = TempDir::new().unwrap();
+    let clone_path = dst_parent.path().join("cloned");
+    let clone_path_str = clone_path.to_string_lossy().to_string();
+
+    let mut server = TestServer::new();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 22,
+        "method": "tools/call",
+        "params": {
+            "name": "git_clone",
+            "arguments": {
+                "url": src_dir.path().to_string_lossy().to_string(),
+                "local_path": clone_path_str
+            }
+        }
+    })
+    .to_string();
+
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+    assert!(
+        clone_path.join(".git").exists(),
+        "Cloned repo should have .git"
+    );
+}
+
+#[test]
+fn test_git_push_fetch_pull() {
+    let remote_dir = TempDir::new().unwrap();
+    Command::new("git")
+        .args(["init", "--bare"])
+        .current_dir(remote_dir.path())
+        .output()
+        .expect("Failed to init bare repo");
+
+    let local_dir = TempDir::new().unwrap();
+    init_repo(local_dir.path());
+    config_user(local_dir.path());
+    commit_file(local_dir.path(), "test.txt", "hello", "Initial commit");
+
+    let local_repo_path = local_dir.path().to_string_lossy().to_string();
+    let remote_path = remote_dir.path().to_string_lossy().to_string();
+
+    let mut server = TestServer::new();
+    server.set_working_dir(&local_repo_path);
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 23,
+        "method": "tools/call",
+        "params": {
+            "name": "git_remote",
+            "arguments": {
+                "mode": "add",
+                "name": "origin",
+                "url": remote_path
+            }
+        }
+    })
+    .to_string();
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 24,
+        "method": "tools/call",
+        "params": {
+            "name": "git_push",
+            "arguments": {
+                "remote": "origin",
+                "branch": "main",
+                "set_upstream": true
+            }
+        }
+    })
+    .to_string();
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+
+    let other_dir = TempDir::new().unwrap();
+    Command::new("git")
+        .args(["clone", remote_dir.path().to_string_lossy().as_ref(), "."])
+        .current_dir(other_dir.path())
+        .output()
+        .expect("Failed to clone remote");
+    config_user(other_dir.path());
+    commit_file(other_dir.path(), "test2.txt", "world", "Second commit");
+    Command::new("git")
+        .args(["push", "origin", "main"])
+        .current_dir(other_dir.path())
+        .output()
+        .expect("Failed to push from other clone");
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 25,
+        "method": "tools/call",
+        "params": {
+            "name": "git_fetch",
+            "arguments": {
+                "remote": "origin"
+            }
+        }
+    })
+    .to_string();
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 26,
+        "method": "tools/call",
+        "params": {
+            "name": "git_pull",
+            "arguments": {
+                "remote": "origin",
+                "branch": "main"
+            }
+        }
+    })
+    .to_string();
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+}
+
+#[test]
+fn test_git_merge() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    config_user(temp_dir.path());
+    commit_file(temp_dir.path(), "test.txt", "hello", "Initial commit");
+
+    Command::new("git")
+        .args(["checkout", "-b", "feature"])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to create branch");
+    commit_file(temp_dir.path(), "feature.txt", "feat", "Feature commit");
+
+    Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to checkout main");
+
+    let repo_path = temp_dir.path().to_string_lossy().to_string();
+    let mut server = TestServer::new();
+    server.set_working_dir(&repo_path);
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 27,
+        "method": "tools/call",
+        "params": {
+            "name": "git_merge",
+            "arguments": {
+                "branch": "feature",
+                "no_fast_forward": true
+            }
+        }
+    })
+    .to_string();
+
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+}
+
+#[test]
+fn test_git_rebase() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    config_user(temp_dir.path());
+    commit_file(temp_dir.path(), "test.txt", "hello", "Initial commit");
+
+    Command::new("git")
+        .args(["checkout", "-b", "feature"])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to create branch");
+    commit_file(temp_dir.path(), "feature.txt", "feat", "Feature commit");
+
+    Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to checkout main");
+    commit_file(temp_dir.path(), "main.txt", "main", "Main commit");
+
+    let repo_path = temp_dir.path().to_string_lossy().to_string();
+    let mut server = TestServer::new();
+    server.set_working_dir(&repo_path);
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 28,
+        "method": "tools/call",
+        "params": {
+            "name": "git_rebase",
+            "arguments": {
+                "upstream": "main",
+                "branch": "feature"
+            }
+        }
+    })
+    .to_string();
+
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+}
+
+#[test]
+fn test_git_cherry_pick() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    config_user(temp_dir.path());
+    commit_file(temp_dir.path(), "test.txt", "hello", "Initial commit");
+
+    Command::new("git")
+        .args(["checkout", "-b", "feature"])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to create branch");
+    commit_file(temp_dir.path(), "feature.txt", "feat", "Feature commit");
+
+    let feature_hash = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to get commit hash");
+    let feature_hash = String::from_utf8_lossy(&feature_hash.stdout)
+        .trim()
+        .to_string();
+
+    Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to checkout main");
+
+    let repo_path = temp_dir.path().to_string_lossy().to_string();
+    let mut server = TestServer::new();
+    server.set_working_dir(&repo_path);
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 29,
+        "method": "tools/call",
+        "params": {
+            "name": "git_cherry_pick",
+            "arguments": {
+                "commits": [feature_hash]
+            }
+        }
+    })
+    .to_string();
+
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+}
+
+#[test]
+fn test_git_blame() {
+    let temp_dir = TempDir::new().unwrap();
+    init_repo(temp_dir.path());
+    config_user(temp_dir.path());
+    commit_file(
+        temp_dir.path(),
+        "test.txt",
+        "hello\nworld\n",
+        "Initial commit",
+    );
+
+    let repo_path = temp_dir.path().to_string_lossy().to_string();
+    let mut server = TestServer::new();
+    server.set_working_dir(&repo_path);
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 30,
+        "method": "tools/call",
+        "params": {
+            "name": "git_blame",
+            "arguments": {
+                "file": "test.txt",
+                "start_line": 1,
+                "end_line": 2
+            }
+        }
+    })
+    .to_string();
+
+    let response = server.send(&request);
+    assert!(
+        response.contains("success"),
+        "Response should contain success: {}",
+        response
+    );
+}
+
+#[test]
+fn test_git_clear_working_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo_path = temp_dir.path().to_string_lossy().to_string();
+    init_repo(temp_dir.path());
+
+    let mut server = TestServer::new();
+    server.set_working_dir(&repo_path);
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 31,
+        "method": "tools/call",
+        "params": {
+            "name": "git_clear_working_dir",
+            "arguments": {
+                "confirm": "Y"
             }
         }
     })
