@@ -201,7 +201,7 @@ pub async fn git_changelog_analyze(
 }
 
 fn build_review_instructions(review_types: &[String]) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(1024);
     out.push_str(
         "Use the provided gitContext (commits and tags) to cross-check the changelog.\n\n",
     );

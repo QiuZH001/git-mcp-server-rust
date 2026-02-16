@@ -13,12 +13,21 @@ use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct ToolContext {
-    pub config: Config,
+    pub config: Arc<Config>,
     pub executor: Arc<RwLock<GitExecutor>>,
 }
 
 impl ToolContext {
     pub fn new(config: Config) -> Self {
+        let config = Arc::new(config);
+        let executor = GitExecutor::new(config.clone());
+        Self {
+            config,
+            executor: Arc::new(RwLock::new(executor)),
+        }
+    }
+
+    pub fn from_shared(config: Arc<Config>) -> Self {
         let executor = GitExecutor::new(config.clone());
         Self {
             config,

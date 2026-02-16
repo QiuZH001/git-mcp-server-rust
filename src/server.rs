@@ -1,20 +1,15 @@
 use crate::config::Config;
-use crate::git::GitExecutor;
 use crate::tools::{advanced, analysis, branching, history, remote, repo, staging, ToolContext};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use schemars::schema_for;
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::Map;
 use serde_json::Value;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub async fn run_server(config: Config) -> anyhow::Result<()> {
-    let executor = GitExecutor::new(config.clone());
-    let ctx = ToolContext {
-        config: config.clone(),
-        executor: Arc::new(RwLock::new(executor)),
-    };
+    let ctx = ToolContext::new(config.clone());
 
     match config.transport_type {
         crate::config::TransportType::Http => {
@@ -42,7 +37,7 @@ async fn run_http_server(ctx: ToolContext) -> anyhow::Result<()> {
 
     #[derive(Clone)]
     struct AppState {
-        config: Config,
+        config: Arc<Config>,
         session_mode: crate::config::SessionMode,
         sessions: Arc<RwLock<HashMap<String, ToolContext>>>,
     }
@@ -95,14 +90,14 @@ async fn run_http_server(ctx: ToolContext) -> anyhow::Result<()> {
                     .iter()
                     .any(|allowed| allowed == origin)
                 {
-                    let resp = json_rpc_error(req.id.clone(), "Forbidden origin", -32003);
+                    let resp = json_rpc_error(req.id.as_ref(), "Forbidden origin", -32003);
                     return (StatusCode::FORBIDDEN, response_headers, resp);
                 }
             }
         }
 
         if let Err(msg) = validate_auth(&state.config, &headers) {
-            let resp = json_rpc_error(req.id.clone(), &msg, -32001);
+            let resp = json_rpc_error(req.id.as_ref(), &msg, -32001);
             return (StatusCode::UNAUTHORIZED, response_headers, resp);
         }
 
@@ -110,7 +105,7 @@ async fn run_http_server(ctx: ToolContext) -> anyhow::Result<()> {
             && state.session_mode != crate::config::SessionMode::Stateless
         {
             let new_id = Uuid::new_v4().to_string();
-            let new_ctx = ToolContext::new(state.config.clone());
+            let new_ctx = ToolContext::from_shared(state.config.clone());
             {
                 let mut sessions = state.sessions.write().await;
                 sessions.insert(new_id.clone(), new_ctx.clone());
@@ -124,18 +119,18 @@ async fn run_http_server(ctx: ToolContext) -> anyhow::Result<()> {
                     if let Some(existing) = sessions.get(&id) {
                         (existing.clone(), None)
                     } else {
-                        let resp = json_rpc_error(req.id.clone(), "Invalid MCP session", -32602);
+                        let resp = json_rpc_error(req.id.as_ref(), "Invalid MCP session", -32602);
                         return (StatusCode::OK, response_headers, resp);
                     }
                 }
                 (crate::config::SessionMode::Stateful, None) => {
-                    let resp = json_rpc_error(req.id.clone(), "Missing MCP-Session-Id", -32602);
+                    let resp = json_rpc_error(req.id.as_ref(), "Missing MCP-Session-Id", -32602);
                     return (StatusCode::OK, response_headers, resp);
                 }
                 (crate::config::SessionMode::Stateless, _) => {
-                    (ToolContext::new(state.config.clone()), None)
+                    (ToolContext::from_shared(state.config.clone()), None)
                 }
-                (_, None) => (ToolContext::new(state.config.clone()), None),
+                (_, None) => (ToolContext::from_shared(state.config.clone()), None),
             }
         };
 
@@ -145,11 +140,10 @@ async fn run_http_server(ctx: ToolContext) -> anyhow::Result<()> {
             }
         }
 
-        let id = req.id.clone();
-        let result = process_request(&ctx_for_call, req).await;
+        let result = process_request(&ctx_for_call, &req.method, req.params.as_deref()).await;
         let resp = match result {
-            Ok(value) => json_rpc_response(id, value),
-            Err(e) => json_rpc_error(id, &e.to_string(), -32603),
+            Ok(value) => json_rpc_response(req.id.as_ref(), value),
+            Err(e) => json_rpc_error(req.id.as_ref(), &e.to_string(), -32603),
         };
 
         (StatusCode::OK, response_headers, resp)
@@ -254,14 +248,14 @@ async fn run_stdio_server(ctx: ToolContext) -> anyhow::Result<()> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
 
+    let mut stdin_lock = stdin.lock();
     let mut line = String::new();
-    let stdin_lock = stdin.lock();
 
-    for line_result in stdin_lock.lines() {
+    loop {
         line.clear();
-        match line_result {
-            Ok(input) => {
-                line = input;
+        match stdin_lock.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
                 let response = handle_request(&ctx, &line).await;
                 writeln!(stdout, "{}", response)?;
                 stdout.flush()?;
@@ -281,49 +275,93 @@ async fn handle_request(ctx: &ToolContext, input: &str) -> String {
 
     match request {
         Ok(req) => {
-            let id = req.id.clone();
-            let result = process_request(ctx, req).await;
+            let result = process_request(ctx, &req.method, req.params.as_deref()).await;
             match result {
-                Ok(response) => json_rpc_response(id, response),
-                Err(e) => json_rpc_error(id, &e.to_string(), -32603),
+                Ok(response) => json_rpc_response(req.id.as_ref(), response),
+                Err(e) => json_rpc_error(req.id.as_ref(), &e.to_string(), -32603),
             }
         }
         Err(e) => json_rpc_error(None, &format!("Parse error: {}", e), -32700),
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct JsonRpcRequest {
     #[serde(rename = "jsonrpc")]
     _jsonrpc: String,
     id: Option<Value>,
     method: String,
-    params: Option<Value>,
+    params: Option<Box<RawValue>>,
 }
 
-fn json_rpc_response(id: Option<Value>, result: Value) -> String {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "result": result,
-        "id": id
+#[derive(Serialize)]
+struct JsonRpcResponse<'a> {
+    jsonrpc: &'static str,
+    result: Value,
+    id: Option<&'a Value>,
+}
+
+#[derive(Serialize)]
+struct JsonRpcErrorPayload<'a> {
+    code: i32,
+    message: &'a str,
+}
+
+#[derive(Serialize)]
+struct JsonRpcErrorResponse<'a> {
+    jsonrpc: &'static str,
+    error: JsonRpcErrorPayload<'a>,
+    id: Option<&'a Value>,
+}
+
+fn json_rpc_response(id: Option<&Value>, result: Value) -> String {
+    serde_json::to_string(&JsonRpcResponse {
+        jsonrpc: "2.0",
+        result,
+        id,
     })
-    .to_string()
+    .unwrap_or_else(|_| "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Serialization failure\"},\"id\":null}".to_string())
 }
 
-fn json_rpc_error(id: Option<Value>, message: &str, code: i32) -> String {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "error": {
-            "code": code,
-            "message": message
-        },
-        "id": id
+fn json_rpc_error<'a>(id: Option<&'a Value>, message: &'a str, code: i32) -> String {
+    serde_json::to_string(&JsonRpcErrorResponse {
+        jsonrpc: "2.0",
+        error: JsonRpcErrorPayload { code, message },
+        id,
     })
-    .to_string()
+    .unwrap_or_else(|_| "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Serialization failure\"},\"id\":null}".to_string())
 }
 
-async fn process_request(ctx: &ToolContext, req: JsonRpcRequest) -> anyhow::Result<Value> {
-    match req.method.as_str() {
+#[derive(Deserialize)]
+struct ToolCallParams {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+#[derive(Deserialize)]
+struct ResourceReadParams {
+    uri: String,
+}
+
+#[derive(Deserialize)]
+struct PromptGetParams {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+fn parse_params<T: for<'de> Deserialize<'de>>(params: Option<&RawValue>) -> anyhow::Result<T> {
+    let raw = params.ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+    Ok(serde_json::from_str(raw.get())?)
+}
+
+async fn process_request(
+    ctx: &ToolContext,
+    method: &str,
+    params: Option<&RawValue>,
+) -> anyhow::Result<Value> {
+    match method {
         "initialize" => Ok(serde_json::json!({
             "protocolVersion": "2025-11-25",
             "capabilities": {
@@ -347,19 +385,9 @@ async fn process_request(ctx: &ToolContext, req: JsonRpcRequest) -> anyhow::Resu
         })),
 
         "tools/call" => {
-            let params = req
-                .params
-                .ok_or_else(|| anyhow::anyhow!("Missing params"))?;
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing tool name"))?;
-            let arguments = params
-                .get("arguments")
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
+            let parsed: ToolCallParams = parse_params(params)?;
 
-            match execute_tool(ctx, name, arguments).await {
+            match execute_tool(ctx, &parsed.name, parsed.arguments).await {
                 Ok(value) => Ok(call_tool_ok(ctx, value)),
                 Err(e) => Ok(call_tool_error(e.to_string())),
             }
@@ -377,15 +405,9 @@ async fn process_request(ctx: &ToolContext, req: JsonRpcRequest) -> anyhow::Resu
         })),
 
         "resources/read" => {
-            let params = req
-                .params
-                .ok_or_else(|| anyhow::anyhow!("Missing params"))?;
-            let uri = params
-                .get("uri")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing uri"))?;
-            if uri != "git://working-directory" {
-                return Err(anyhow::anyhow!("Resource not found: {}", uri));
+            let parsed: ResourceReadParams = parse_params(params)?;
+            if parsed.uri != "git://working-directory" {
+                return Err(anyhow::anyhow!("Resource not found: {}", parsed.uri));
             }
 
             let executor = ctx.executor.read().await;
@@ -426,34 +448,28 @@ async fn process_request(ctx: &ToolContext, req: JsonRpcRequest) -> anyhow::Resu
         })),
 
         "prompts/get" => {
-            let params = req
-                .params
-                .ok_or_else(|| anyhow::anyhow!("Missing params"))?;
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing name"))?;
-            if name != "git_wrapup" {
-                return Err(anyhow::anyhow!("Prompt not found: {}", name));
+            let parsed: PromptGetParams = parse_params(params)?;
+            if parsed.name != "git_wrapup" {
+                return Err(anyhow::anyhow!("Prompt not found: {}", parsed.name));
             }
 
-            let args = params
-                .get("arguments")
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
-            let changelog_path = args
+            let changelog_path = parsed
+                .arguments
                 .get("changelogPath")
                 .and_then(|v| v.as_str())
                 .unwrap_or("CHANGELOG.md");
-            let skip_docs = args
+            let skip_docs = parsed
+                .arguments
                 .get("skipDocumentation")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let create_tag = args
+            let create_tag = parsed
+                .arguments
                 .get("createTag")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let update_agent_files = args
+            let update_agent_files = parsed
+                .arguments
                 .get("updateAgentFiles")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
@@ -491,16 +507,16 @@ async fn process_request(ctx: &ToolContext, req: JsonRpcRequest) -> anyhow::Resu
             }))
         }
 
-        _ => Err(anyhow::anyhow!("Unknown method: {}", req.method)),
+        _ => Err(anyhow::anyhow!("Unknown method: {}", method)),
     }
 }
 
 fn call_tool_ok(ctx: &ToolContext, value: Value) -> Value {
     let text = match ctx.config.response_verbosity {
-        crate::config::ResponseVerbosity::Minimal => {
-            serde_json::to_string(&value).unwrap_or_else(|_| value.to_string())
+        crate::config::ResponseVerbosity::Full => {
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
         }
-        _ => serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+        _ => serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
     };
     let text = match ctx.config.response_format {
         crate::config::ResponseFormat::Markdown => format!("```json\n{}\n```", text),

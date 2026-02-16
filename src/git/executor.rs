@@ -1,15 +1,17 @@
 use crate::config::Config;
 use crate::error::{GitMcpError, Result};
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 
 pub struct GitExecutor {
-    config: Config,
+    config: Arc<Config>,
     working_dir: Option<PathBuf>,
 }
 
 impl GitExecutor {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Arc<Config>) -> Self {
         Self {
             config,
             working_dir: None,
@@ -30,7 +32,7 @@ impl GitExecutor {
         self.working_dir = None;
     }
 
-    fn build_command_in_dir(&self, args: &[&str], dir: Option<&PathBuf>) -> Result<Command> {
+    fn build_command_in_dir(&self, args: &[&str], dir: Option<&Path>) -> Result<Command> {
         let mut cmd = Command::new("git");
 
         for arg in args {
@@ -68,8 +70,8 @@ impl GitExecutor {
             .output()
             .map_err(|e| GitMcpError::GitCommandFailed(format!("Failed to execute git: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = output_to_string(output.stdout);
+        let stderr = output_to_string(output.stderr);
 
         if !output.status.success() {
             return Err(GitMcpError::GitCommandFailed(format!(
@@ -85,15 +87,15 @@ impl GitExecutor {
         })
     }
 
-    pub fn execute_in_dir(&self, dir: &PathBuf, args: &[&str]) -> Result<GitOutput> {
+    pub fn execute_in_dir(&self, dir: &Path, args: &[&str]) -> Result<GitOutput> {
         let mut cmd = self.build_command_in_dir(args, Some(dir))?;
 
         let output = cmd
             .output()
             .map_err(|e| GitMcpError::GitCommandFailed(format!("Failed to execute git: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = output_to_string(output.stdout);
+        let stderr = output_to_string(output.stderr);
 
         if !output.status.success() {
             return Err(GitMcpError::GitCommandFailed(format!(
@@ -130,8 +132,8 @@ impl GitExecutor {
             .wait_with_output()
             .map_err(|e| GitMcpError::GitCommandFailed(format!("Failed to wait for git: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = output_to_string(output.stdout);
+        let stderr = output_to_string(output.stderr);
 
         if !output.status.success() {
             return Err(GitMcpError::GitCommandFailed(format!(
@@ -149,7 +151,7 @@ impl GitExecutor {
 
     pub fn execute_with_stdin_in_dir(
         &self,
-        dir: &PathBuf,
+        dir: &Path,
         args: &[&str],
         stdin_data: &str,
     ) -> Result<GitOutput> {
@@ -173,8 +175,8 @@ impl GitExecutor {
             .wait_with_output()
             .map_err(|e| GitMcpError::GitCommandFailed(format!("Failed to wait for git: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = output_to_string(output.stdout);
+        let stderr = output_to_string(output.stderr);
 
         if !output.status.success() {
             return Err(GitMcpError::GitCommandFailed(format!(
@@ -188,6 +190,13 @@ impl GitExecutor {
             stderr,
             status: output.status.code().unwrap_or(-1),
         })
+    }
+}
+
+fn output_to_string(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(&e.into_bytes()).into_owned(),
     }
 }
 
