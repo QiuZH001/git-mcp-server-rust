@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::Map;
 use serde_json::Value;
+use std::cell::RefCell;
+
+type ResponseBuffer = Vec<u8>;
+
+thread_local! {
+    static RESPONSE_BUFFER: RefCell<ResponseBuffer> = RefCell::new(Vec::with_capacity(8192));
+}
 
 pub async fn run_server(config: Config) -> anyhow::Result<()> {
     let ctx = ToolContext::new(config.clone());
@@ -315,21 +322,43 @@ struct JsonRpcErrorResponse<'a> {
 }
 
 fn json_rpc_response(id: Option<&Value>, result: Value) -> String {
-    serde_json::to_string(&JsonRpcResponse {
-        jsonrpc: "2.0",
-        result,
-        id,
+    RESPONSE_BUFFER.with(|buffer| {
+        let mut buf = buffer.borrow_mut();
+        buf.clear();
+        if serde_json::to_writer(
+            &mut *buf,
+            &JsonRpcResponse {
+                jsonrpc: "2.0",
+                result,
+                id,
+            },
+        )
+        .is_err()
+        {
+            return "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Serialization failure\"},\"id\":null}".to_string();
+        }
+        String::from_utf8_lossy(&buf).into_owned()
     })
-    .unwrap_or_else(|_| "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Serialization failure\"},\"id\":null}".to_string())
 }
 
 fn json_rpc_error<'a>(id: Option<&'a Value>, message: &'a str, code: i32) -> String {
-    serde_json::to_string(&JsonRpcErrorResponse {
-        jsonrpc: "2.0",
-        error: JsonRpcErrorPayload { code, message },
-        id,
+    RESPONSE_BUFFER.with(|buffer| {
+        let mut buf = buffer.borrow_mut();
+        buf.clear();
+        if serde_json::to_writer(
+            &mut *buf,
+            &JsonRpcErrorResponse {
+                jsonrpc: "2.0",
+                error: JsonRpcErrorPayload { code, message },
+                id,
+            },
+        )
+        .is_err()
+        {
+            return "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Serialization failure\"},\"id\":null}".to_string();
+        }
+        String::from_utf8_lossy(&buf).into_owned()
     })
-    .unwrap_or_else(|_| "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Serialization failure\"},\"id\":null}".to_string())
 }
 
 #[derive(Deserialize)]
@@ -512,12 +541,21 @@ async fn process_request(
 }
 
 fn call_tool_ok(ctx: &ToolContext, value: Value) -> Value {
-    let text = match ctx.config.response_verbosity {
-        crate::config::ResponseVerbosity::Full => {
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+    let text = RESPONSE_BUFFER.with(|buffer| {
+        let mut buf = buffer.borrow_mut();
+        buf.clear();
+        let write_result = match ctx.config.response_verbosity {
+            crate::config::ResponseVerbosity::Full => {
+                serde_json::to_writer_pretty(&mut *buf, &value)
+            }
+            _ => serde_json::to_writer(&mut *buf, &value),
+        };
+        if write_result.is_err() {
+            return value.to_string();
         }
-        _ => serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()),
-    };
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+
     let text = match ctx.config.response_format {
         crate::config::ResponseFormat::Markdown => format!("```json\n{}\n```", text),
         _ => text,
@@ -604,7 +642,11 @@ fn tool_def<T: JsonSchema>(name: &str, description: &str) -> Value {
     })
 }
 
-async fn execute_tool(ctx: &ToolContext, name: &str, arguments: Value) -> anyhow::Result<Value> {
+pub async fn execute_tool(
+    ctx: &ToolContext,
+    name: &str,
+    arguments: Value,
+) -> anyhow::Result<Value> {
     match name {
         "git_status" => {
             let input: repo::GitStatusInput = serde_json::from_value(arguments)?;
